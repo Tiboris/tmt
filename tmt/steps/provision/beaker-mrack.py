@@ -80,7 +80,7 @@ class TmtBeakerTransformer(BeakerTransformer):
             "meta_distro": "distro" in environment,
             "arch": environment["hw"].get("arch", "x86_64"),
             "variant": variant,
-            f"mrack_{BEAKER}": host.get(BEAKER, {}),
+            f"mrack_{BEAKER}": host,
         }
 
 class BeakerAPI:
@@ -171,13 +171,13 @@ GUEST_STATE_COLORS = {
     "Reserved": "green",
     "New": "blue",
     "Scheduled": "blue",
-    "Queued": "magenta",
-    "Processed": "magenta",
+    "Queued": "cyan",
+    "Processed": "cyan",
     'Waiting': 'magenta',
-    'Installing': 'cyan',
-    "Running": "cyan",
+    'Installing': 'magenta',
     "Cancelled": "yellow",
     "Aborted": "yellow",
+    "Running": "green",
     "Completed": "green",
 }
 
@@ -357,7 +357,7 @@ class GuestBeaker(tmt.GuestSsh):
             raise ProvisionError(
                 f"Failed to create, response status: '{response['status']}'.")
 
-        self.guestname = response["rid"]
+        self.guestname = response["id"] if not response["system"] else response["system"]
         self.info('guestname', self.guestname, 'green')
 
         with updatable_message(
@@ -365,6 +365,7 @@ class GuestBeaker(tmt.GuestSsh):
 
             def get_new_state() -> GuestInspectType:
                 response = self.api.inspect()
+                self.guestname = response["id"] if not response["system"] else response["system"]
 
                 if response["status"] == "Aborted":
                     raise ProvisionError(
