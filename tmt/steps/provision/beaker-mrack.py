@@ -5,6 +5,8 @@ from typing import Any, Dict, List, Optional, cast
 
 import click
 import random
+import logging
+
 
 import tmt
 import tmt.options
@@ -19,30 +21,132 @@ else:
     from typing_extensions import TypedDict
 
 
-DEFAULT_API_URL = 'http://127.0.0.1:8001'
+import mrack
+
+from mrack.utils import async_run
+
+from mrack.providers import providers
+from mrack.providers.beaker import PROVISIONER_KEY as BEAKER
+from mrack.providers.beaker import BeakerProvider
+from mrack.transformers.beaker import BeakerTransformer
+
+providers.register(BEAKER, BeakerProvider)
+
 DEFAULT_USER = 'root'
 DEFAULT_ARCH = 'x86_64'
 DEFAULT_KEYNAME = 'default'
-DEFAULT_PROVISION_TIMEOUT = 60
-DEFAULT_PROVISION_TICK = 6
+DEFAULT_PROVISION_TIMEOUT = 600
+DEFAULT_PROVISION_TICK = 60
 
 
 # Type annotation for "data" package describing a guest instance. Passed
 # between load() and save() calls
 GuestInspectType = TypedDict(
     'GuestInspectType', {
-        'state': str,
+        "status": str,
         'address': Optional[str]
         }
     )
+
+class TmtBeakerTransformer(BeakerTransformer):
+    def _get_distro_and_variant(self, environment):
+        """Get distribution and its variant for the host system to requirement."""
+        compose = environment["os"].get("compose")
+        required_distro = self._find_value(
+            environment, "distro", "distros", compose, default=compose
+        )
+        distro_variants = self.config.get("distro_variants")
+
+        if "beaker_variant" in environment["os"]:
+            variant = environment["beaker_variant"]
+        elif distro_variants:
+            variant = distro_variants.get(
+                required_distro, distro_variants.get("default")
+            )
+        else:  # Default to Server for RHEL7 and Fedora systems
+            variant = "Server"
+
+        return (required_distro, variant)
+
+    def create_host_requirement(self, host):
+        """Create single input for Beaker provisioner."""
+        environment = host.get("environment")
+        distro, variant = self._get_distro_and_variant(environment)
+        return {
+            "name": environment.get("name"),
+            "distro": distro,
+            "os": environment.get("os"),
+            "group": environment.get("group"),
+            "meta_distro": "distro" in environment,
+            "arch": environment["hw"].get("arch", "x86_64"),
+            "variant": variant,
+            f"mrack_{BEAKER}": host.get(BEAKER, {}),
+        }
+
+class BeakerAPI:
+    @async_run
+    async def __init__(self, guest: 'GuestBeaker') -> None:
+        # HAX remove mrack stdout
+        mrack.logger.removeHandler(mrack.console_handler)
+
+        self._guest = guest # FIXME
+
+        # use global context class
+        global_context = mrack.context.global_context
+
+        # init global context with paths to files
+        mrack_config = "mrack.conf"
+        provisioning_config = "provisioning-config.yaml"
+        db_file = "mrackdb.json"
+        global_context.init(mrack_config, provisioning_config, db_file)
+
+        self._mrack_transformer = TmtBeakerTransformer()
+        await self._mrack_transformer.init(global_context.PROV_CONFIG, {})
+
+
+    @async_run
+    async def create(
+            self,
+            data: Dict[str, Any],
+            ) -> Dict:
+        """
+        Create - or request creation of - a resource using mrack up.
+
+        :param data: optional key/value data to send with the request.
+
+        """
+        req = self._mrack_transformer.create_host_requirement(data)
+        self._bkr_job_id, self._req = await self._mrack_transformer._provider.create_server(req)
+        return self._mrack_transformer._provider._get_recipe_info(self._bkr_job_id)
+
+
+    @async_run
+    async def inspect(
+            self,
+            ) -> Dict:
+        """
+        Inspect a resource.  # kinda wait till provisioned
+
+        """
+        return self._mrack_transformer._provider._get_recipe_info(self._bkr_job_id)
+
+
+    @async_run
+    async def delete(  # destroy
+            self,
+            ) -> Dict:
+        """
+        Delete - or request removal of - a resource.
+
+        """
+        return await self._mrack_transformer._provider.delete_host(self._bkr_job_id, None)
+
+
 
 @dataclasses.dataclass
 class BeakerGuestData(tmt.steps.provision.GuestSshData):
     # Override parent class with our defaults
     user: str = DEFAULT_USER
-
-    # API
-    api_url: str = DEFAULT_API_URL
 
     # Guest request properties
     arch: str = DEFAULT_ARCH
@@ -63,67 +167,18 @@ class BeakerGuestData(tmt.steps.provision.GuestSshData):
 GUEST_STATE_COLOR_DEFAULT = 'green'
 
 GUEST_STATE_COLORS = {
-    'routing': 'yellow',
-    'provisioning': 'magenta',
-    'promised': 'blue',
-    'preparing': 'cyan',
-    'cancelled': 'red',
-    'error': 'red'
+    "Reserved": "green",
+    "New": "blue",
+    "Scheduled": "blue",
+    "Queued": "magenta",
+    "Processed": "magenta",
+    'Waiting': 'magenta',
+    'Installing': 'cyan',
+    "Running": "cyan",
+    "Cancelled": "yellow",
+    "Aborted": "yellow",
+    "Completed": "green",
 }
-
-
-class BeakerAPI:
-    def __init__(self, guest: 'GuestBeaker') -> None:
-        self._guest = guest
-
-    def create(
-            self,
-            data: Dict[str, Any],
-            ) -> Dict:
-        """
-        Create - or request creation of - a resource using mrack up.
-
-        :param data: optional key/value data to send with the request.
-
-        """
-
-
-        return {
-            "state": "provisioning",
-            "guestname": "beakerHOST",
-        }
-
-    def inspect(
-            self,
-            ) -> Dict:
-        """
-        Inspect a resource.
-
-        """
-        state = random.choice(list(set(GUEST_STATE_COLORS) - {"cancelled", "error"} ))
-
-        if random.randint(0,999) % 11 == 0:
-            state = "ready"
-
-        import time
-        time.sleep(3)
-        return {
-            "state": state,
-            "guestname": "beakerHOST",
-            "address": "Brno",
-        }
-
-    def delete(
-            self,
-            path: str,
-            request_kwargs: Optional[Dict[str, Any]] = None
-            ) -> Dict:
-        """
-        Delete - or request removal of - a resource.
-
-        """
-
-        return {}
 
 
 @tmt.steps.provides_method('beaker')
@@ -294,39 +349,40 @@ class GuestBeaker(tmt.GuestSsh):
 
         response = self.api.create(data)
 
-        if response:
+        if response["status"] == "New":
             self.info('guest', 'has been requested', 'green')
 
         else:
             raise ProvisionError(
-                f"Failed to create, '{response['state']}'.")
+                f"Failed to create, response status: '{response['status']}'.")
 
-        self.guestname = response['guestname']
+        self.guestname = response["rid"]
         self.info('guestname', self.guestname, 'green')
 
         with updatable_message(
-                'state', indent_level=self._level()) as progress_message:
+                "status", indent_level=self._level()) as progress_message:
 
             def get_new_state() -> GuestInspectType:
                 response = self.api.inspect()
 
-                if response['state'] in {"cancelled", "error"}:
+                if response["status"] == "Aborted":
                     raise ProvisionError(
                         f"Failed to create, "
-                        f"unhandled API response '{response['state']}'.")
+                        f"unhandled API response '{response['status']}'.")
 
                 current = cast(GuestInspectType, response)
-                state = current['state']
+                state = current["status"]
                 state_color = GUEST_STATE_COLORS.get(
-                    state, GUEST_STATE_COLOR_DEFAULT)
+                    state, GUEST_STATE_COLOR_DEFAULT
+                )
 
                 progress_message.update(state, color=state_color)
 
-                if state == 'error':
+                if state in {"Error, Aborted"}:
                     raise ProvisionError(
                         'Failed to create, provisioning failed.')
 
-                if state == 'ready':
+                if state == 'Reserved':
                     return current
 
                 raise tmt.utils.WaitingIncomplete()
@@ -337,11 +393,12 @@ class GuestBeaker(tmt.GuestSsh):
                         seconds=self.provision_timeout), tick=self.provision_tick)
 
             except tmt.utils.WaitingTimedOutError:
+                response = self.api.delete()
                 raise ProvisionError(
                     f'Failed to provision in the given amount '
                     f'of time (--provision-timeout={self.provision_timeout}).')
 
-        self.guest = guest_info['address']
+        self.guest = guest_info['system']
         self.info('address', self.guest, 'green')
 
     def start(self) -> None:
@@ -362,19 +419,4 @@ class GuestBeaker(tmt.GuestSsh):
         if self.guestname is None:
             return
 
-        response = self.api.delete(f'/guests/{self.guestname}')
-
-        if response['state'] == 404:
-            self.info('guest', 'no longer exists', 'red')
-
-        elif response['state'] == 409:
-            self.info('guest', 'has existing snapshots', 'red')
-
-        elif response.ok:
-            self.info('guest', 'has been removed', 'green')
-
-        else:
-            self.info(
-                'guest',
-                f"Failed to remove, "
-                f"unhandled API response '{response['state']}'.")
+        self.api.delete()
