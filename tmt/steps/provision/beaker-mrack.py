@@ -35,8 +35,8 @@ providers.register(BEAKER, BeakerProvider)
 DEFAULT_USER = 'root'
 DEFAULT_ARCH = 'x86_64'
 DEFAULT_KEYNAME = 'default'
-DEFAULT_PROVISION_TIMEOUT = 600
-DEFAULT_PROVISION_TICK = 60
+DEFAULT_PROVISION_TIMEOUT = 3600  # 1 hour timeout at least
+DEFAULT_PROVISION_TICK = 60  # poll job each minute
 
 
 # Type annotation for "data" package describing a guest instance. Passed
