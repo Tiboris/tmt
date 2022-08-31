@@ -102,6 +102,7 @@ class BeakerAPI:
 
         self._mrack_transformer = TmtBeakerTransformer()
         await self._mrack_transformer.init(global_context.PROV_CONFIG, {})
+        self._mrack_provider = self._mrack_transformer._provider
 
 
     @async_run
@@ -116,8 +117,8 @@ class BeakerAPI:
 
         """
         req = self._mrack_transformer.create_host_requirement(data)
-        self._bkr_job_id, self._req = await self._mrack_transformer._provider.create_server(req)
-        return self._mrack_transformer._provider._get_recipe_info(self._bkr_job_id)
+        self._bkr_job_id, self._req = await self._mrack_provider.create_server(req)
+        return self._mrack_provider._get_recipe_info(self._bkr_job_id)
 
 
     @async_run
@@ -128,7 +129,7 @@ class BeakerAPI:
         Inspect a resource.  # kinda wait till provisioned
 
         """
-        return self._mrack_transformer._provider._get_recipe_info(self._bkr_job_id)
+        return self._mrack_provider._get_recipe_info(self._bkr_job_id)
 
 
     @async_run
@@ -139,7 +140,7 @@ class BeakerAPI:
         Delete - or request removal of - a resource.
 
         """
-        return await self._mrack_transformer._provider.delete_host(self._bkr_job_id, None)
+        return await self._mrack_provider.delete_host(self._bkr_job_id, None)
 
 
 
