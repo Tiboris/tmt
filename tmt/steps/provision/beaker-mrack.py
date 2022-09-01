@@ -1,7 +1,8 @@
 import dataclasses
 import datetime
+from os import cpu_count
 import sys
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, Optional, cast, is_typeddict
 
 import click
 import random
@@ -48,6 +49,12 @@ GuestInspectType = TypedDict(
         }
     )
 
+size_translation = {
+    "TB": 1048576,
+    "GB": 1024,
+    "MB": 1,
+}
+
 class TmtBeakerTransformer(BeakerTransformer):
     def _get_distro_and_variant(self, environment):
         """Get distribution and its variant for the host system to requirement."""
@@ -68,10 +75,112 @@ class TmtBeakerTransformer(BeakerTransformer):
 
         return (required_distro, variant)
 
+    def _parse_memory(self, mem_string):
+        mem = mem_string.split(" ")
+
+        amount, operator = None, None
+        for chunk in mem:
+            try:
+                amount = int(chunk)
+            except ValueError:
+                if chunk.isupper():
+                    amount *= size_translation[chunk]
+                else:
+                    operator = chunk
+
+        if not operator:
+            operator = "="
+        return operator, amount
+
+    def _translate_tmt_hw(self, hw):
+        key = "_key"
+        value = "_value"
+        op = "_op"
+
+        system = {}
+        # system_type = {}
+        #    #   - system_type:
+        #    #         _value: Machine
+        #    #         _op: "="
+        disks = []
+        #       disk:
+        #         size:
+        #           _value: 137438953472
+        #           _op: ">"
+        cpu = {}
+        # - cpu_count:
+        #     _value: 1
+        #     _op: "="
+
+        print(hw)
+        for key, val in hw.items():
+            if key == "memory":
+                operator, amount = self._parse_memory(val)
+                system.update({
+                    key: {
+                        value: amount,
+                        op: operator
+                    }
+                })
+            if key == "disk":
+                for dsk in val:
+                    operator, disk = self._parse_memory(dsk["size"])
+                    disks.append({
+                        "disk":{
+                            "size": {
+                                value: disk,
+                                op: operator,
+                            }
+                        }
+                    })
+            if key == "cpu":
+                if val.get("processors"):
+                    cpu.update({
+                        "cpu_count":{
+                            value: val["processors"],
+                            op: "=",
+                        }
+                    })
+                if val.get("model"):
+                    cpu.update({
+                        "model":{
+                            value: val["model"],
+                            op: "=",
+                        }
+                    })
+
+        and_req = []
+        for rec in [system, disks, cpu]:
+            if not rec:
+                continue
+            if isinstance(rec, dict):
+                and_req.append(rec)
+            if isinstance(rec, list):
+                and_req += rec
+
+        host_req = {
+            "hostRequires":{
+                "and": and_req
+            }
+        }
+
+        return host_req
+
     def create_host_requirement(self, host):
         """Create single input for Beaker provisioner."""
         environment = host.get("environment")
+
+        # FIXME remove testing set of HW eg: https://beaker.engineering.redhat.com/jobs/clone?job_id=6969642
+        # environment["hw"]["memory"] = ">= 8 GB"
+        # environment["hw"]["cpu"] = {
+        #     "processors": 2,
+        #     "model": 3060776,
+        # }
+        # environment["hw"]["disk"] = [{"size": "> 80 GB"}]
+        mrack_req = self._translate_tmt_hw(environment.get("hw"))
+        mrack_req.update({"user_data": environment.get("user_data")})
         distro, variant = self._get_distro_and_variant(environment)
+        print(distro, variant)
         return {
             "name": environment.get("name"),
             "distro": distro,
@@ -80,7 +189,7 @@ class TmtBeakerTransformer(BeakerTransformer):
             "meta_distro": "distro" in environment,
             "arch": environment["hw"].get("arch", "x86_64"),
             "variant": variant,
-            f"mrack_{BEAKER}": host,
+            f"mrack_{BEAKER}": mrack_req,
         }
 
 class BeakerAPI:
@@ -141,7 +250,6 @@ class BeakerAPI:
 
         """
         return await self._mrack_provider.delete_host(self._bkr_job_id, None)
-
 
 
 @dataclasses.dataclass
@@ -266,23 +374,23 @@ class ProvisionBeaker(tmt.steps.provision.ProvisionPlugin):
                 for key, value in (
                     pair.split('=', 1)
                     for pair in self.get('user-data')
-                    )
-                }
+                )
+            }
 
         except ValueError:
             raise ProvisionError('Cannot parse user-data.')
 
         data = BeakerGuestData(
-                arch=self.get('arch'),
-                image=self.get('image'),
-                hardware=self.get('hardware'),
-                pool=self.get('pool'),
-                keyname=self.get('keyname'),
-                user_data=user_data,
-                user=self.get('user'),
-                provision_timeout=self.get('provision-timeout'),
-                provision_tick=self.get('provision-tick'),
-            )
+            arch=self.get('arch'),
+            image=self.get('image'),
+            hardware=self.get('hardware'),
+            pool=self.get('pool'),
+            keyname=self.get('keyname'),
+            user_data=user_data,
+            user=self.get('user'),
+            provision_timeout=self.get('provision-timeout'),
+            provision_tick=self.get('provision-tick'),
+        )
 
         self._guest = GuestBeaker(data, name=self.name, parent=self.step)
         self._guest.start()
@@ -328,17 +436,17 @@ class GuestBeaker(tmt.GuestSsh):
         environment: Dict[str, Any] = {
             'hw': {
                 'arch': self.arch
-                },
+            },
             'os': {
                 'compose': self.image
-                }
             }
+        }
 
         data: Dict[str, Any] = {
             'environment': environment,
             'keyname': self.keyname,
             'user_data': self.user_data
-            }
+        }
 
         if self.pool:
             environment['pool'] = self.pool
@@ -350,14 +458,14 @@ class GuestBeaker(tmt.GuestSsh):
 
         response = self.api.create(data)
 
-        if response["status"] == "New":
+        if response:
             self.info('guest', 'has been requested', 'green')
 
         else:
             raise ProvisionError(
-                f"Failed to create, response status: '{response['status']}'.")
+                f"Failed to create, response: '{response}'.")
 
-        self.guestname = response["id"] if not response["system"] else response["system"]
+        self.guestname = response["id"]
         self.info('guestname', self.guestname, 'green')
 
         with updatable_message(
@@ -380,7 +488,7 @@ class GuestBeaker(tmt.GuestSsh):
 
                 progress_message.update(state, color=state_color)
 
-                if state in {"Error, Aborted"}:
+                if state in {"Error, Aborted", "Cancelled"}:
                     raise ProvisionError(
                         'Failed to create, provisioning failed.')
 
