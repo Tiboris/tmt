@@ -112,7 +112,6 @@ class TmtBeakerTransformer(BeakerTransformer):
         #     _value: 1
         #     _op: "="
 
-        print(hw)
         for key, val in hw.items():
             if key == "memory":
                 operator, amount = self._parse_memory(val)
@@ -180,7 +179,6 @@ class TmtBeakerTransformer(BeakerTransformer):
         mrack_req = self._translate_tmt_hw(environment.get("hw"))
         mrack_req.update({"user_data": environment.get("user_data")})
         distro, variant = self._get_distro_and_variant(environment)
-        print(distro, variant)
         return {
             "name": environment.get("name"),
             "distro": distro,
